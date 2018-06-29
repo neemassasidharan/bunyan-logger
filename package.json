@@ -4,7 +4,7 @@
   "description": "Koa middleware for logging requests using bunyan",
   "main": "index.js",
   "engines": {
-    "node": ">= 0.11.4"
+    "node": ">= 8"
   },
   "scripts": {
     "test": "make test"
