@@ -22,7 +22,7 @@ function createOrUseLogger(logger) {
 }
 
 /*
- * Koa middleware that adds this.log property to the koa context
+ * Koa middleware that adds ctx.log property to the koa context
  * containing a bunyan logger instance.
  *
  * Parameters:
@@ -30,55 +30,54 @@ function createOrUseLogger(logger) {
  *                    that will be passed to bunyan.createLogger. If not
  *                    specified, a default logger will be used.
  */
-module.exports = function (loggerInstance) {
+module.exports = function(loggerInstance) {
   loggerInstance = createOrUseLogger(loggerInstance);
 
-  return function *logger(next) {
-    this.log = loggerInstance;
+  return async (ctx, next) => {
+    ctx.log = loggerInstance;
 
-    yield *next; // jshint ignore:line
+    await next();
   };
 };
 
 /*
  * Koa middleware that gets a unique request id from a header or
  * generates a new one, and adds the requestId to all messages logged
- * using this.log in downstream middleware and handlers.
+ * using ctx.log in downstream middleware and handlers.
  *
  * Must use(koaBunyanLogger()) before using this middleware.
  *
  * Parameters:
  *  - opts: object with optional properties:
  *    - header: name of header to get request id from (default X-Request-Id)
- *    - prop: property to store on 'this' context (default 'reqId')
- *    - requestProp: property to store on 'this.request' (default 'reqId')
+ *    - prop: property to store on ctx (default 'reqId')
+ *    - requestProp: property to store on 'ctx.request' (default 'reqId')
  *    - field: log field name for bunyan (default 'req_id')
  */
-module.exports.requestIdContext = function (opts) {
+module.exports.requestIdContext = function(opts) {
   opts = opts || {};
 
   var header = opts.header || 'X-Request-Id';
   var ctxProp = opts.prop || 'reqId';
   var requestProp = opts.requestProp || 'reqId';
   var logField = opts.field || 'req_id';
-  var fallbackLogger;
 
-  return function *requestIdContext(next) {
-    var reqId = this.request.get(header) || uuid.v4();
+  return async function requestIdContext(ctx, next) {
+    var reqId = ctx.request.get(header) || uuid.v4();
 
-    this[ctxProp] = reqId;
-    this.request[requestProp] = reqId;
+    ctx[ctxProp] = reqId;
+    ctx.request[requestProp] = reqId;
 
     var logFields = {};
     logFields[logField] = reqId;
 
-    if (!this.log) {
+    if (!ctx.log) {
       throw new Error('must use(koaBunyanLogger()) before this middleware');
     }
 
-    this.log = this.log.child(logFields);
+    ctx.log = ctx.log.child(logFields);
 
-    yield *next; // jshint ignore:line
+    await next(); // jshint ignore:line
   };
 };
 
@@ -97,51 +96,63 @@ module.exports.requestIdContext = function (opts) {
  *    - formatRequestMessage: function (requestData)
  *    - formatResponseMessage: function (responseData)
  */
-module.exports.requestLogger = function (opts) {
+module.exports.requestLogger = function(opts) {
   opts = opts || {};
 
-  var levelFn = opts.levelFn || function (status, err) {
-    if (status >= 500) {
-      return 'error';
-    } else if (status >= 400) {
-      return 'warn';
-    } else {
-      return 'info';
-    }
-  };
+  var levelFn =
+    opts.levelFn ||
+    function(ctx, err) {
+      var status = ctx.status;
+      if (status >= 500) {
+        return 'error';
+      } else if (status >= 400) {
+        return 'warn';
+      } else {
+        return 'info';
+      }
+    };
 
   var durationField = opts.durationField || 'duration';
 
-  var formatRequestMessage = opts.formatRequestMessage || function (data) {
-    return util.format('  <-- %s %s',
-                       this.request.method, this.request.originalUrl);
-  };
+  var formatRequestMessage =
+    opts.formatRequestMessage ||
+    function(ctx, data) {
+      return util.format(
+        '  <-- %s %s',
+        ctx.request.method,
+        ctx.request.originalUrl
+      );
+    };
 
-  var formatResponseMessage = opts.formatResponseMessage || function (data) {
-    return util.format('  --> %s %s %d %sms',
-                       this.request.method, this.request.originalUrl,
-                       this.status, data[durationField]);
-  };
+  var formatResponseMessage =
+    opts.formatResponseMessage ||
+    function(ctx, data) {
+      return util.format(
+        '  --> %s %s %d %sms',
+        ctx.request.method,
+        ctx.request.originalUrl,
+        ctx.status,
+        data[durationField]
+      );
+    };
 
-  return function *requestLogger(next) {
-    var url = this.url;
-
+  return async function requestLogger(ctx, next) {
     var requestData = {
-      req: this.req
+      req: ctx.req
     };
 
     requestData = updateFields(this, opts.updateLogFields, requestData);
     requestData = updateFields(this, opts.updateRequestLogFields, requestData);
 
-    this.log.info(requestData, formatRequestMessage.call(this, requestData));
+    ctx.log.info(requestData, formatRequestMessage(ctx, requestData));
 
     var startTime = new Date().getTime();
     var err;
 
-    var onResponseFinished = function () {
+    var onResponseFinished = function(ctx) {
       var responseData = {
-        req: this.req,
-        res: this.res
+        req: ctx.req,
+        res: ctx.res
       };
 
       if (err) {
@@ -150,27 +161,30 @@ module.exports.requestLogger = function (opts) {
 
       responseData[durationField] = new Date().getTime() - startTime;
 
-      responseData = updateFields(this, opts.updateLogFields, responseData);
-      responseData = updateFields(this, opts.updateResponseLogFields,
-                                  responseData, err);
+      responseData = updateFields(ctx, opts.updateLogFields, responseData);
+      responseData = updateFields(
+        ctx,
+        opts.updateResponseLogFields,
+        responseData,
+        err
+      );
 
-      var level = levelFn.call(this, this.status, err);
+      var level = levelFn(ctx, err);
 
-      this.log[level](responseData,
-                      formatResponseMessage.call(this, responseData));
+      ctx.log[level](responseData, formatResponseMessage(ctx, responseData));
 
       // Remove log object to mitigate accidental leaks
-      this.log = null;
+      ctx.log = null;
     };
 
     try {
-      yield *next; // jshint ignore:line
+      await next(); // jshint ignore:line
     } catch (e) {
       err = e;
     } finally {
       // Handle response logging and cleanup when request is finished
       // This ensures that the default error handler is done
-      onFinished(this.response.res, onResponseFinished.bind(this));
+      onFinished(ctx.response.res, () => onResponseFinished(ctx));
     }
 
     if (err) {
@@ -179,7 +193,7 @@ module.exports.requestLogger = function (opts) {
   };
 };
 
-function updateFields (ctx, func, data, err) {
+function updateFields(ctx, func, data, err) {
   if (!func) return data;
 
   try {
@@ -195,7 +209,7 @@ function updateFields (ctx, func, data, err) {
 }
 
 /**
- * Middleware which adds methods this.time(label) and this.timeEnd(label)
+ * Middleware which adds methods ctx.time(label) and ctx.timeEnd(label)
  * to koa context.
  *
  * Parameters:
@@ -207,39 +221,38 @@ function updateFields (ctx, func, data, err) {
  *
  * Must use(koaBunyanLogger()) before using this middleware.
  */
-module.exports.timeContext = function (opts) {
+module.exports.timeContext = function(opts) {
   opts = opts || {};
 
   var logLevel = opts.logLevel || 'trace';
   var updateLogFields = opts.updateLogFields;
 
-  return function *timeContext(next) {
-    this._timeContextStartTimes = {};
+  return async function timeContext(ctx, next) {
+    ctx._timeContextStartTimes = {};
 
-    this.time = time;
-    this.timeEnd = timeEnd;
+    ctx.time = label => time(ctx, label);
+    ctx.timeEnd = label => timeEnd(ctx, label);
 
-    yield* next; // jshint ignore:line
+    await next(); // jshint ignore:line
   };
 
-  function time (label) {
-    /*jshint validthis:true */
-    var startTimes = this._timeContextStartTimes;
+  function time(ctx, label) {
+    var startTimes = ctx._timeContextStartTimes;
 
     if (startTimes[label]) {
-      this.log.warn('time() called for previously used label %s', label);
+      ctx.log.warn('time() called for previously used label %s', label);
     }
 
     startTimes[label] = new Date().getTime();
   }
 
-  function timeEnd (label) {
-    /*jshint validthis:true */
-    var startTimes = this._timeContextStartTimes;
+  function timeEnd(ctx, label) {
+    var startTimes = ctx._timeContextStartTimes;
     var startTime = startTimes[label];
 
-    if (!startTime) { // whoops!
-      this.log.warn('timeEnd() called without time() for label %s', label);
+    if (!startTime) {
+      // whoops!
+      ctx.log.warn('timeEnd() called without time() for label %s', label);
       return;
     }
 
@@ -250,8 +263,8 @@ module.exports.timeContext = function (opts) {
       msg: label + ': ' + duration + 'ms'
     };
 
-    fields = updateFields(this, updateLogFields, fields);
-    this.log[logLevel](fields);
+    fields = updateFields(ctx, updateLogFields, fields);
+    ctx.log[logLevel](fields);
 
     startTimes[label] = null;
   }
